@@ -9,9 +9,9 @@ class ThreadStatus{
 public:
     bool isFinished;
     int idleUntilCycle;
+    uint32_t nextLine;
 
-
-    ThreadStatus():isFinished(false),idleUntilCycle(-1){};
+    ThreadStatus():isFinished(false),idleUntilCycle(-1),nextLine(0){};
     ThreadStatus(const ThreadStatus &threadStatus) = delete;
     ThreadStatus &operator=(const ThreadStatus &threadStatus) = delete;
     ~ThreadStatus() = default;
@@ -34,7 +34,8 @@ public:
 
     CoreMT(bool isBlockedMT):isBlockedMT(isBlockedMT),numOfThreads(SIM_GetThreadsNum()),
                                             currentThread(0),numOfCycles(0),loadLatency(SIM_GetLoadLat()),
-                                            storeLatency(SIM_GetStoreLat()),switchOverhead(SIM_GetSwitchCycles()),numOfInts(0){
+                                            storeLatency(SIM_GetStoreLat()),switchOverhead(SIM_GetSwitchCycles()),numOfInts(0)
+                                            ,threads(nullptr) ,regFile(nullptr){
         this->threads = new ThreadStatus[this->numOfThreads];
         this->regFile = new tcontext;
         for(int i=0; i<REGS_COUNT; i++){
@@ -43,10 +44,185 @@ public:
     };
     CoreMT(const CoreMT &coreMT) = delete;
     CoreMT &operator=(const CoreMT &coreMT) = delete;
-    ~CoreMT(){};
+    ~CoreMT(){
+        delete[] this->threads;
+        delete[] this->regFile;
+    };
+
+    int findNextThread(int currThread){
+        bool allThreadFinished = true;
+        int nextThread = (currThread + 1) % (this->numOfThreads);
+        int counter = 0;
+        while(counter < this->numOfThreads){
+            if(!this->threads[nextThread].isFinished && this->numOfCycles > this->threads[nextThread].idleUntilCycle){
+                return nextThread;
+            }
+            if(!this->threads[nextThread].isFinished) allThreadFinished = false;
+            nextThread = (nextThread + 1) % (this->numOfThreads);
+            counter++;
+        }
+        if(allThreadFinished) return -2;
+        else return -1; //all threads are idle
+
+    }
 
     void runBlockedMT(){
+        int currThread = 0;
+        bool isEvent = false;
+        bool isIdle = false;
+        bool allThreadsFinishd = false;
+        while(!allThreadsFinishd){
+            if(!isIdle) {
+                isEvent = false;
+                Instruction currInst;
+                SIM_MemInstRead(this->threads[currThread].nextLine, &currInst, currThread);
+                int opc = currInst.opcode;
+                switch (opc) {
+                    case CMD_NOP: // NOP
+                        break;
+                    case CMD_ADDI:
+                        this->regFile[currThread].reg[currInst.dst_index] =
+                                this->regFile[currThread].reg[currInst.src1_index] + currInst.src2_index_imm;
+                        break;
+                    case CMD_SUBI:
+                        this->regFile[currThread].reg[currInst.dst_index] =
+                                this->regFile[currThread].reg[currInst.src1_index] - currInst.src2_index_imm;
+                        break;
+                    case CMD_ADD:
+                        this->regFile[currThread].reg[currInst.dst_index] =
+                                this->regFile[currThread].reg[currInst.src1_index] +
+                                this->regFile[currThread].reg[currInst.src2_index_imm];
+                        break;
+                    case CMD_SUB:
+                        this->regFile[currThread].reg[currInst.dst_index] =
+                                this->regFile[currThread].reg[currInst.src1_index] -
+                                this->regFile[currThread].reg[currInst.src2_index_imm];
+                        break;
+                    case CMD_LOAD:
+                        if (currInst.isSrc2Imm) {
+                            SIM_MemDataRead(
+                                    (uint32_t) this->regFile[currThread].reg[currInst.src1_index] +
+                                    currInst.src2_index_imm,
+                                    &(this->regFile[currThread].reg[currInst.dst_index]));
+                        } else {
+                            SIM_MemDataRead((uint32_t) this->regFile[currThread].reg[currInst.src1_index] +
+                                            this->regFile[currThread].reg[currInst.src2_index_imm],
+                                            &(this->regFile[currThread].reg[currInst.dst_index]));
+                        }
+                        this->threads[currThread].idleUntilCycle = this->numOfCycles + this->loadLatency;
+                        isEvent = true;
+                        break;
+                    case CMD_STORE:
+                        if (currInst.isSrc2Imm) {
+                            SIM_MemDataWrite(
+                                    (uint32_t) this->regFile[currThread].reg[currInst.dst_index] +
+                                    currInst.src2_index_imm,
+                                    this->regFile[currThread].reg[currInst.src1_index]);
+                        } else {
+                            SIM_MemDataWrite((uint32_t) this->regFile[currThread].reg[currInst.dst_index] +
+                                            this->regFile[currThread].reg[currInst.src2_index_imm],
+                                            this->regFile[currThread].reg[currInst.src1_index]);
+                        }
+                        this->threads[currThread].idleUntilCycle = this->numOfCycles + this->storeLatency;
+                        isEvent = true;
+                        break;
+                    case CMD_HALT:
+                        this->threads[currThread].isFinished = true;
+                        isEvent = true;
+                        break;
+                }
+            }
+            this->threads[currThread].nextLine += 4;
+            this->numOfCycles ++;
+            if(!isIdle) this->numOfInts++;
 
+            if(isEvent || isIdle) {
+                int nextThread = this->findNextThread(currThread);
+                if(nextThread == -2){
+                    allThreadsFinishd = true;
+                }else {
+                    if (nextThread == -1)isIdle = true;
+                    else isIdle = false;
+                    if (!isIdle && currThread != nextThread)this->numOfCycles += this->switchOverhead;
+                    if (!isIdle) currThread = nextThread;
+                }
+            }
+        }
+    }
+
+    void runFinegrainedMT(){
+        int currThread = 0;
+        bool isIdle = false;
+        bool allThreadsFinishd = false;
+        while(!allThreadsFinishd){
+            if(!isIdle) {
+                Instruction currInst;
+                SIM_MemInstRead(this->threads[currThread].nextLine, &currInst, currThread);
+                int opc = currInst.opcode;
+                switch (opc) {
+                    case CMD_NOP: // NOP
+                        break;
+                    case CMD_ADDI:
+                        this->regFile[currThread].reg[currInst.dst_index] =
+                                this->regFile[currThread].reg[currInst.src1_index] + currInst.src2_index_imm;
+                        break;
+                    case CMD_SUBI:
+                        this->regFile[currThread].reg[currInst.dst_index] =
+                                this->regFile[currThread].reg[currInst.src1_index] - currInst.src2_index_imm;
+                        break;
+                    case CMD_ADD:
+                        this->regFile[currThread].reg[currInst.dst_index] =
+                                this->regFile[currThread].reg[currInst.src1_index] +
+                                this->regFile[currThread].reg[currInst.src2_index_imm];
+                        break;
+                    case CMD_SUB:
+                        this->regFile[currThread].reg[currInst.dst_index] =
+                                this->regFile[currThread].reg[currInst.src1_index] -
+                                this->regFile[currThread].reg[currInst.src2_index_imm];
+                        break;
+                    case CMD_LOAD:
+                        if (currInst.isSrc2Imm) {
+                            SIM_MemDataRead(
+                                    (uint32_t) this->regFile[currThread].reg[currInst.src1_index] +
+                                    currInst.src2_index_imm,
+                                    &(this->regFile[currThread].reg[currInst.dst_index]));
+                        } else {
+                            SIM_MemDataRead((uint32_t) this->regFile[currThread].reg[currInst.src1_index] +
+                                            this->regFile[currThread].reg[currInst.src2_index_imm],
+                                            &(this->regFile[currThread].reg[currInst.dst_index]));
+                        }
+                        this->threads[currThread].idleUntilCycle = this->numOfCycles + this->loadLatency;
+                        break;
+                    case CMD_STORE:
+                        if (currInst.isSrc2Imm) {
+                            SIM_MemDataWrite(
+                                    (uint32_t) this->regFile[currThread].reg[currInst.dst_index] +
+                                    currInst.src2_index_imm,
+                                    this->regFile[currThread].reg[currInst.src1_index]);
+                        } else {
+                            SIM_MemDataWrite((uint32_t) this->regFile[currThread].reg[currInst.dst_index] +
+                                            this->regFile[currThread].reg[currInst.src2_index_imm],
+                                            this->regFile[currThread].reg[currInst.src1_index]);
+                        }
+                        this->threads[currThread].idleUntilCycle = this->numOfCycles + this->storeLatency;
+                        break;
+                    case CMD_HALT:
+                        this->threads[currThread].isFinished = true;
+                        break;
+                }
+            }
+            this->threads[currThread].nextLine += 4;
+            this->numOfCycles ++;
+            if(!isIdle) this->numOfInts++;
+            int nextThread = this->findNextThread(currThread);
+            if(nextThread == -2){
+                allThreadsFinishd = true;
+            }else {
+                if (nextThread == -1)isIdle = true;
+                else isIdle = false;
+                if (!isIdle) currThread = nextThread;
+            }
+        }
     }
 };
 
@@ -65,15 +241,23 @@ void CORE_FinegrainedMT() {
 }
 
 double CORE_BlockedMT_CPI(){
-	return 0;
+    if(BlockedMT == nullptr) return 0;
+    double CPI = ((double)(BlockedMT->numOfCycles)/(BlockedMT->numOfInts));
+    delete BlockedMT;
+    return CPI;
 }
 
 double CORE_FinegrainedMT_CPI(){
-	return 0;
+    if(FinegrainedMT == nullptr) return 0;
+    double CPI = ((double)(FinegrainedMT->numOfCycles)/(BlockedMT->numOfInts));
+    delete BlockedMT;
+    return CPI;
 }
 
 void CORE_BlockedMT_CTX(tcontext* context, int threadid) {
+    *context = BlockedMT->regFile[threadid];
 }
 
 void CORE_FinegrainedMT_CTX(tcontext* context, int threadid) {
+    *context = FinegrainedMT->regFile[threadid];
 }
