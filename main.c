@@ -6,11 +6,14 @@
 
 int main(int argc, char const *argv[]){
 	char const *memFname = argv[1];
+    //char const *memFname = "example1.img";
 
 	if (SIM_MemReset(memFname) != 0) {
 		fprintf(stderr, "Failed initializing memory simulator!\n");
 	    exit(2);
 	}
+
+    printf("\n---- SIM_MemReset ----\n");
 
 	int threads = SIM_GetThreadsNum();
 

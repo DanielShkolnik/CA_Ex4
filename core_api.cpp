@@ -4,6 +4,7 @@
 #include "sim_api.h"
 
 #include <stdio.h>
+#include <iostream>
 
 class ThreadStatus{
 public:
@@ -12,9 +13,9 @@ public:
     uint32_t nextLine;
 
     ThreadStatus():isFinished(false),idleUntilCycle(-1),nextLine(0){};
-    ThreadStatus(const ThreadStatus &threadStatus) = delete;
-    ThreadStatus &operator=(const ThreadStatus &threadStatus) = delete;
-    ~ThreadStatus() = default;
+    //ThreadStatus(const ThreadStatus &threadStatus);
+    //ThreadStatus &operator=(const ThreadStatus &threadStatus);
+    //~ThreadStatus() = default;
 };
 
 
@@ -29,29 +30,32 @@ public:
     int switchOverhead;
     int numOfInts;
     ThreadStatus* threads;
-    tcontext* regFile;
+    tcontext* regFiles;
 
 
     CoreMT(bool isBlockedMT):isBlockedMT(isBlockedMT),numOfThreads(SIM_GetThreadsNum()),
                                             currentThread(0),numOfCycles(0),loadLatency(SIM_GetLoadLat()),
                                             storeLatency(SIM_GetStoreLat()),switchOverhead(SIM_GetSwitchCycles()),numOfInts(0)
-                                            ,threads(nullptr) ,regFile(nullptr){
+                                            ,threads(NULL) ,regFiles(NULL){
         this->threads = new ThreadStatus[this->numOfThreads];
-        this->regFile = new tcontext;
-        for(int i=0; i<REGS_COUNT; i++){
-            this->regFile->reg[i]=0;
+        this->regFiles = new tcontext[this->numOfThreads];
+        for(int i=0; i<this->numOfThreads; i++){
+            for(int j=0; j<REGS_COUNT; j++){
+                this->regFiles[i].reg[j]=0;
+            }
         }
+
     };
-    CoreMT(const CoreMT &coreMT) = delete;
-    CoreMT &operator=(const CoreMT &coreMT) = delete;
+    //CoreMT(const CoreMT &coreMT) = delete;
+    //CoreMT &operator=(const CoreMT &coreMT) = delete;
     ~CoreMT(){
         delete[] this->threads;
-        delete[] this->regFile;
+        delete[] this->regFiles;
     };
 
-    int findNextThread(int currThread){
+    int findNextThreadBlockedMT(int currThread){
         bool allThreadFinished = true;
-        int nextThread = (currThread + 1) % (this->numOfThreads);
+        int nextThread = currThread;
         int counter = 0;
         while(counter < this->numOfThreads){
             if(!this->threads[nextThread].isFinished && this->numOfCycles > this->threads[nextThread].idleUntilCycle){
@@ -66,12 +70,32 @@ public:
 
     }
 
+
+    int findNextThreadFinegrainedMT(int currThread){
+        bool allThreadFinished = true;
+        int nextThread =  (currThread + 1) % (this->numOfThreads);
+        int counter = 0;
+        while(counter < this->numOfThreads){
+            if(!this->threads[nextThread].isFinished && this->numOfCycles > this->threads[nextThread].idleUntilCycle){
+                return nextThread;
+            }
+            if(!this->threads[nextThread].isFinished) allThreadFinished = false;
+            nextThread = (nextThread + 1) % (this->numOfThreads);
+            counter++;
+        }
+        if(allThreadFinished) return -2;
+        else return -1; //all threads are idle
+
+    }
+
+
     void runBlockedMT(){
         int currThread = 0;
         bool isEvent = false;
         bool isIdle = false;
         bool allThreadsFinishd = false;
         while(!allThreadsFinishd){
+            //std::cout << this->numOfCycles << std::endl;
             if(!isIdle) {
                 isEvent = false;
                 Instruction currInst;
@@ -81,47 +105,50 @@ public:
                     case CMD_NOP: // NOP
                         break;
                     case CMD_ADDI:
-                        this->regFile[currThread].reg[currInst.dst_index] =
-                                this->regFile[currThread].reg[currInst.src1_index] + currInst.src2_index_imm;
+                        this->regFiles[currThread].reg[currInst.dst_index] =
+                                this->regFiles[currThread].reg[currInst.src1_index] + currInst.src2_index_imm;
                         break;
                     case CMD_SUBI:
-                        this->regFile[currThread].reg[currInst.dst_index] =
-                                this->regFile[currThread].reg[currInst.src1_index] - currInst.src2_index_imm;
+                        this->regFiles[currThread].reg[currInst.dst_index] =
+                                this->regFiles[currThread].reg[currInst.src1_index] - currInst.src2_index_imm;
                         break;
                     case CMD_ADD:
-                        this->regFile[currThread].reg[currInst.dst_index] =
-                                this->regFile[currThread].reg[currInst.src1_index] +
-                                this->regFile[currThread].reg[currInst.src2_index_imm];
+                        this->regFiles[currThread].reg[currInst.dst_index] =
+                                this->regFiles[currThread].reg[currInst.src1_index] +
+                                this->regFiles[currThread].reg[currInst.src2_index_imm];
                         break;
                     case CMD_SUB:
-                        this->regFile[currThread].reg[currInst.dst_index] =
-                                this->regFile[currThread].reg[currInst.src1_index] -
-                                this->regFile[currThread].reg[currInst.src2_index_imm];
+                        this->regFiles[currThread].reg[currInst.dst_index] =
+                                this->regFiles[currThread].reg[currInst.src1_index] -
+                                this->regFiles[currThread].reg[currInst.src2_index_imm];
                         break;
                     case CMD_LOAD:
                         if (currInst.isSrc2Imm) {
+                            //std::cout << "Load addr " << (uint32_t) this->regFiles[currThread].reg[currInst.src1_index] + currInst.src2_index_imm << std::endl;
                             SIM_MemDataRead(
-                                    (uint32_t) this->regFile[currThread].reg[currInst.src1_index] +
-                                    currInst.src2_index_imm,
-                                    &(this->regFile[currThread].reg[currInst.dst_index]));
+                                    (uint32_t) this->regFiles[currThread].reg[currInst.src1_index] + currInst.src2_index_imm,
+                                    &(this->regFiles[currThread].reg[currInst.dst_index]));
                         } else {
-                            SIM_MemDataRead((uint32_t) this->regFile[currThread].reg[currInst.src1_index] +
-                                            this->regFile[currThread].reg[currInst.src2_index_imm],
-                                            &(this->regFile[currThread].reg[currInst.dst_index]));
+                            //std::cout << "Load addr " << (uint32_t) this->regFiles[currThread].reg[currInst.src1_index] + this->regFiles[currThread].reg[currInst.src2_index_imm] << std::endl;
+                            SIM_MemDataRead((uint32_t) this->regFiles[currThread].reg[currInst.src1_index] +
+                                            this->regFiles[currThread].reg[currInst.src2_index_imm],
+                                            &(this->regFiles[currThread].reg[currInst.dst_index]));
                         }
                         this->threads[currThread].idleUntilCycle = this->numOfCycles + this->loadLatency;
                         isEvent = true;
                         break;
                     case CMD_STORE:
                         if (currInst.isSrc2Imm) {
+                            //std::cout << "Store addr " << (uint32_t) this->regFiles[currThread].reg[currInst.dst_index] + currInst.src2_index_imm<< "  Store value " << this->regFiles[currThread].reg[currInst.src1_index] << std::endl;
                             SIM_MemDataWrite(
-                                    (uint32_t) this->regFile[currThread].reg[currInst.dst_index] +
+                                    (uint32_t) this->regFiles[currThread].reg[currInst.dst_index] +
                                     currInst.src2_index_imm,
-                                    this->regFile[currThread].reg[currInst.src1_index]);
+                                    this->regFiles[currThread].reg[currInst.src1_index]);
                         } else {
-                            SIM_MemDataWrite((uint32_t) this->regFile[currThread].reg[currInst.dst_index] +
-                                            this->regFile[currThread].reg[currInst.src2_index_imm],
-                                            this->regFile[currThread].reg[currInst.src1_index]);
+                            //std::cout << "Store addr " << (uint32_t) this->regFiles[currThread].reg[currInst.dst_index] + this->regFiles[currThread].reg[currInst.src2_index_imm]<< "  Store value " << this->regFiles[currThread].reg[currInst.src1_index] << std::endl;
+                            SIM_MemDataWrite((uint32_t) this->regFiles[currThread].reg[currInst.dst_index] +
+                                            this->regFiles[currThread].reg[currInst.src2_index_imm],
+                                            this->regFiles[currThread].reg[currInst.src1_index]);
                         }
                         this->threads[currThread].idleUntilCycle = this->numOfCycles + this->storeLatency;
                         isEvent = true;
@@ -132,23 +159,32 @@ public:
                         break;
                 }
             }
-            this->threads[currThread].nextLine += 4;
+            if(!isIdle) this->threads[currThread].nextLine++;
             this->numOfCycles ++;
             if(!isIdle) this->numOfInts++;
 
             if(isEvent || isIdle) {
-                int nextThread = this->findNextThread(currThread);
-                if(nextThread == -2){
-                    allThreadsFinishd = true;
-                }else {
+                int nextThread = this->findNextThreadBlockedMT(currThread);
+                //std::cout << "nextThread " << nextThread << std::endl;
+                if(nextThread == -2) allThreadsFinishd = true;
+                else {
                     if (nextThread == -1)isIdle = true;
                     else isIdle = false;
                     if (!isIdle && currThread != nextThread)this->numOfCycles += this->switchOverhead;
                     if (!isIdle) currThread = nextThread;
                 }
             }
+            /*
+            printf("\n---- Blocked MT Simulation ----\n");
+            for(int k=0; k<this->numOfThreads; k++){
+                printf("\nRegister file thread id %d:\n", k);
+                for (int i=0; i<REGS_COUNT; ++i)
+                    printf("\tR%d = 0x%X", i, this->regFiles[k].reg[i]);
+                 }*/
         }
     }
+
+
 
     void runFinegrainedMT(){
         int currThread = 0;
@@ -163,46 +199,50 @@ public:
                     case CMD_NOP: // NOP
                         break;
                     case CMD_ADDI:
-                        this->regFile[currThread].reg[currInst.dst_index] =
-                                this->regFile[currThread].reg[currInst.src1_index] + currInst.src2_index_imm;
+                        this->regFiles[currThread].reg[currInst.dst_index] =
+                                this->regFiles[currThread].reg[currInst.src1_index] + currInst.src2_index_imm;
                         break;
                     case CMD_SUBI:
-                        this->regFile[currThread].reg[currInst.dst_index] =
-                                this->regFile[currThread].reg[currInst.src1_index] - currInst.src2_index_imm;
+                        this->regFiles[currThread].reg[currInst.dst_index] =
+                                this->regFiles[currThread].reg[currInst.src1_index] - currInst.src2_index_imm;
                         break;
                     case CMD_ADD:
-                        this->regFile[currThread].reg[currInst.dst_index] =
-                                this->regFile[currThread].reg[currInst.src1_index] +
-                                this->regFile[currThread].reg[currInst.src2_index_imm];
+                        this->regFiles[currThread].reg[currInst.dst_index] =
+                                this->regFiles[currThread].reg[currInst.src1_index] +
+                                this->regFiles[currThread].reg[currInst.src2_index_imm];
                         break;
                     case CMD_SUB:
-                        this->regFile[currThread].reg[currInst.dst_index] =
-                                this->regFile[currThread].reg[currInst.src1_index] -
-                                this->regFile[currThread].reg[currInst.src2_index_imm];
+                        this->regFiles[currThread].reg[currInst.dst_index] =
+                                this->regFiles[currThread].reg[currInst.src1_index] -
+                                this->regFiles[currThread].reg[currInst.src2_index_imm];
                         break;
                     case CMD_LOAD:
                         if (currInst.isSrc2Imm) {
+                            //std::cout << "Load addr " << (uint32_t) this->regFiles[currThread].reg[currInst.src1_index] + currInst.src2_index_imm << std::endl;
                             SIM_MemDataRead(
-                                    (uint32_t) this->regFile[currThread].reg[currInst.src1_index] +
+                                    (uint32_t) this->regFiles[currThread].reg[currInst.src1_index] +
                                     currInst.src2_index_imm,
-                                    &(this->regFile[currThread].reg[currInst.dst_index]));
+                                    &(this->regFiles[currThread].reg[currInst.dst_index]));
                         } else {
-                            SIM_MemDataRead((uint32_t) this->regFile[currThread].reg[currInst.src1_index] +
-                                            this->regFile[currThread].reg[currInst.src2_index_imm],
-                                            &(this->regFile[currThread].reg[currInst.dst_index]));
+                            //std::cout << "Load addr " << (uint32_t) this->regFiles[currThread].reg[currInst.src1_index] + this->regFiles[currThread].reg[currInst.src2_index_imm] << std::endl;
+                            SIM_MemDataRead((uint32_t) this->regFiles[currThread].reg[currInst.src1_index] +
+                                            this->regFiles[currThread].reg[currInst.src2_index_imm],
+                                            &(this->regFiles[currThread].reg[currInst.dst_index]));
                         }
                         this->threads[currThread].idleUntilCycle = this->numOfCycles + this->loadLatency;
                         break;
                     case CMD_STORE:
                         if (currInst.isSrc2Imm) {
+                            //std::cout << "Store addr " << (uint32_t) this->regFiles[currThread].reg[currInst.dst_index] + currInst.src2_index_imm << std::endl;
                             SIM_MemDataWrite(
-                                    (uint32_t) this->regFile[currThread].reg[currInst.dst_index] +
+                                    (uint32_t) this->regFiles[currThread].reg[currInst.dst_index] +
                                     currInst.src2_index_imm,
-                                    this->regFile[currThread].reg[currInst.src1_index]);
+                                    this->regFiles[currThread].reg[currInst.src1_index]);
                         } else {
-                            SIM_MemDataWrite((uint32_t) this->regFile[currThread].reg[currInst.dst_index] +
-                                            this->regFile[currThread].reg[currInst.src2_index_imm],
-                                            this->regFile[currThread].reg[currInst.src1_index]);
+                            //std::cout << "Store addr " << (uint32_t) this->regFiles[currThread].reg[currInst.dst_index] + this->regFiles[currThread].reg[currInst.src2_index_imm] << std::endl;
+                            SIM_MemDataWrite((uint32_t) this->regFiles[currThread].reg[currInst.dst_index] +
+                                            this->regFiles[currThread].reg[currInst.src2_index_imm],
+                                            this->regFiles[currThread].reg[currInst.src1_index]);
                         }
                         this->threads[currThread].idleUntilCycle = this->numOfCycles + this->storeLatency;
                         break;
@@ -211,10 +251,10 @@ public:
                         break;
                 }
             }
-            this->threads[currThread].nextLine += 4;
+            if(!isIdle) this->threads[currThread].nextLine++;
             this->numOfCycles ++;
             if(!isIdle) this->numOfInts++;
-            int nextThread = this->findNextThread(currThread);
+            int nextThread = this->findNextThreadFinegrainedMT(currThread);
             if(nextThread == -2){
                 allThreadsFinishd = true;
             }else {
@@ -227,8 +267,8 @@ public:
 };
 
 
-CoreMT* BlockedMT= nullptr;
-CoreMT* FinegrainedMT= nullptr;
+CoreMT* BlockedMT= NULL;
+CoreMT* FinegrainedMT= NULL;
 
 void CORE_BlockedMT() {
     BlockedMT = new CoreMT(true);
@@ -241,23 +281,31 @@ void CORE_FinegrainedMT() {
 }
 
 double CORE_BlockedMT_CPI(){
-    if(BlockedMT == nullptr) return 0;
+    if(BlockedMT == NULL) return 0;
+    //std::cout << "numOfCycles " << BlockedMT->numOfCycles <<  " numOfInts " << BlockedMT->numOfInts << std::endl;
     double CPI = ((double)(BlockedMT->numOfCycles)/(BlockedMT->numOfInts));
     delete BlockedMT;
     return CPI;
 }
 
 double CORE_FinegrainedMT_CPI(){
-    if(FinegrainedMT == nullptr) return 0;
+    if(FinegrainedMT == NULL) return 0;
     double CPI = ((double)(FinegrainedMT->numOfCycles)/(BlockedMT->numOfInts));
+    //std::cout << "numOfCycles " << FinegrainedMT->numOfCycles  << " numOfInts "  << BlockedMT->numOfInts << std::endl;
     delete BlockedMT;
     return CPI;
 }
 
 void CORE_BlockedMT_CTX(tcontext* context, int threadid) {
-    *context = BlockedMT->regFile[threadid];
+    if(BlockedMT == NULL) return;
+    for(int i=0; i<REGS_COUNT; i++){
+        context[threadid].reg[i] = BlockedMT->regFiles[threadid].reg[i];
+    }
 }
 
 void CORE_FinegrainedMT_CTX(tcontext* context, int threadid) {
-    *context = FinegrainedMT->regFile[threadid];
+    if(FinegrainedMT == NULL) return;
+    for(int i=0; i<REGS_COUNT; i++){
+        context[threadid].reg[i] = FinegrainedMT->regFiles[threadid].reg[i];
+    }
 }
